@@ -1,6 +1,7 @@
 """Standard-library agent directory. Lexical scores are not ownership confidence."""
 from __future__ import annotations
 import base64
+from collections import Counter
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ import tempfile
 import uuid
 
 BUDGET, LIMIT = 4096, 8
-RANKING_VERSION = "lexical-idf-v2"
+RANKING_VERSION = "field-bm25-v2-frozen"
 STOP = set("a an the to for from of on in with and or is it this that please me my our use agent follow up about latest previous again now can you handle task work send draft reply".split())
 
 def encoded(value):
@@ -31,6 +32,30 @@ def terms(text):
 def phrases(text):
     tokens = [t for t in re.findall(r"[^\W_]+", str(text).casefold()) if t not in STOP and len(t) > 1]
     return set(zip(tokens, tokens[1:]))
+
+# Small domain-general lexical aliases, not project/contact or owner aliases.
+ALIASES = {"vendor": "supplier", "agreement": "contract", "renewal": "extension",
+           "refund": "reimbursement", "purchase": "procurement", "shipping": "shipment",
+           "authorization": "approval", "reservation": "booking"}
+
+
+def positive_query(text):
+    # Only explicit comma-delimited contrast; not general negation understanding.
+    return re.sub(r",\s*not\s+[^.!?\n]*(?:[.!?]|$)", " ", text, flags=re.I)
+
+
+def retrieval_tokens(text):
+    """Conservative plural folding for scoring only, never for identity."""
+    result = []
+    for token in re.findall(r"[^\W_]+", str(text).casefold()):
+        if token in STOP or len(token) <= 1:
+            continue
+        if len(token) > 4 and token.endswith("ies"):
+            token = token[:-3] + "y"
+        elif len(token) > 4 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
+            token = token[:-1]
+        result.append(ALIASES.get(token, token))
+    return result
 
 def normalized(text):
     return " ".join(re.findall(r"[^\W_]+", str(text).casefold()))
@@ -200,25 +225,53 @@ class AgentDirectory:
             self._write()
 
     def rank(self, query, enriched=True, pinned=()):
-        q, rows = terms(query), []
-        documents = [terms(r["name"] + (" " + r["purpose"] + " " + " ".join(r["entities"] + r["recent_instructions"]) if enriched else "")) for r in self.records]
-        weights = {t: 1 + math.log((len(documents)+1)/(1+sum(t in d for d in documents))) for t in q}
-        query_phrases = phrases(query)
+        # One normalized token stream per field; duplicated metadata does not
+        # become multiple independent votes for the same responsibility.
+        documents = []
         for r in self.records:
-            exact = r["ref"] in query or contains_name(query, r["name"])
-            fields = [("name", r["name"], 5)]
+            fields = {"name": Counter(retrieval_tokens(r["name"]))}
             if enriched:
-                fields += [("entities", " ".join(r["entities"]), 3), ("purpose", r["purpose"], 2), ("recent", " ".join(r["recent_instructions"]), 1)]
-            score, why = 0, []
-            for label, text, weight in fields:
-                matches = q & terms(text)
-                score += weight * sum(weights[t] for t in matches)
-                score += weight * 2 * len(query_phrases & phrases(text))
+                responsibility = Counter()
+                for text in [r["purpose"], *r["recent_instructions"]]:
+                    responsibility |= Counter(retrieval_tokens(text))
+                fields["responsibility"] = responsibility
+            documents.append(fields)
+        if not documents:
+            return []
+        weights = {"name": 1.0, "responsibility": 2.0}
+        averages = {field: sum(sum(d.get(field, {}).values()) for d in documents) / len(documents)
+                    for field in weights}
+        # Production retrieval_query separates latest request from older user
+        # context with a newline. Context still contributes, but at half weight.
+        query = positive_query(query)
+        latest, _, context = query.partition("\n")
+        q = {t: 0.5 for t in retrieval_tokens(context)}
+        q.update({t: 1.0 for t in retrieval_tokens(latest)})
+        unions = [set().union(*(set(c) for c in d.values())) for d in documents]
+        idf = {t: math.log(1 + (len(documents) - sum(t in d for d in unions) + 0.5) /
+                           (sum(t in d for d in unions) + 0.5)) for t in q}
+        rows = []
+        for r, fields in zip(self.records, documents):
+            score, why = 0.0, []
+            # Saturate once per query term, after field normalization. The
+            # strongest field supplies evidence; copying history into a name
+            # must not multiply the same match's contribution.
+            for t in q:
+                evidence = []
+                for field, counts in fields.items():
+                    length = sum(counts.values())
+                    norm = min(1.5, 0.5 + 0.5 * length / (averages[field] or 1))
+                    evidence.append(weights[field] * counts.get(t, 0) / norm)
+                tf = max(evidence, default=0)
+                score += q[t] * idf[t] * tf * 2.2 / (tf + 1.2)
+            for field, counts in fields.items():
+                matches = sorted(set(q) & counts.keys())
                 if matches:
-                    why.append(label + ": " + ", ".join(sorted(matches)[:4]))
+                    why.append(field + ": " + ", ".join(matches[:4]))
+            exact = r["ref"] in query or contains_name(query, r["name"])
+            pin = r["ref"] in pinned
             if exact:
                 why.insert(0, "explicit name/reference")
-            pin = r["ref"] in pinned
             if pin:
                 why.insert(0, "recent delegation")
             rows.append((exact, pin, round(score, 4), r["last_used_at"] or "", r, why))
@@ -263,6 +316,7 @@ class AgentDirectory:
     def shortlist(self, latest, transcript="", enriched=True):
         self.load()
         rows = self.rank(retrieval_query(latest, transcript), enriched, self.recent_refs)
+        latest = positive_query(latest)
         explicit = {r["ref"] for r in self.records if r["ref"] in latest or contains_name(latest, r["name"])}
         rows.sort(key=lambda row: row[4]["ref"] in explicit, reverse=True)
         page = self._page(rows, 0, "shortlist", "<active_agents>\n\n</active_agents>")

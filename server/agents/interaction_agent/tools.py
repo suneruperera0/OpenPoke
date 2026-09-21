@@ -9,6 +9,7 @@ from ...logging_config import logger
 from ...services.conversation import get_conversation_log
 from ...services.execution import get_agent_roster, get_execution_agent_logs
 from ..execution_agent.batch_manager import ExecutionBatchManager
+from ...services.execution.routing_trace import emit
 
 
 @dataclass
@@ -26,7 +27,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "send_message_to_agent",
-            "description": "Deliver instructions to a specific execution agent. Creates a new agent if the name doesn't exist in the roster, or reuses an existing one.",
+            "description": "Dispatch to an existing owner by agent_ref or exact agent_name. Unknown names return candidates without creating. Use create_agent only for a distinct new responsibility.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -35,8 +36,9 @@ TOOL_SCHEMAS = [
                         "description": "Human-readable agent name describing its purpose (e.g., 'Vercel Job Offer', 'Email to Sharanjeet'). This name will be used to identify and potentially reuse the agent."
                     },
                     "instructions": {"type": "string", "description": "Instructions for the agent to execute."},
+                    "agent_ref": {"type": "string", "description": "Opaque ref from directory. Prefer this when a display name is shortened."},
                 },
-                "required": ["agent_name", "instructions"],
+                "required": ["instructions"],
                 "additionalProperties": False,
             },
         },
@@ -107,17 +109,60 @@ TOOL_SCHEMAS = [
 
 _EXECUTION_BATCH_MANAGER = ExecutionBatchManager()
 
+TOOL_SCHEMAS.extend([
+    {"type": "function", "function": {
+        "name": "search_agents",
+        "description": "Discover existing owners across the entire directory, including old agents. Rephrase a miss; empty query lists all agents. Pagination is a recovery mechanism.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"}, "cursor": {"type": "string"}},
+            "required": ["query"], "additionalProperties": False}}},
+    {"type": "function", "function": {
+        "name": "create_agent",
+        "description": "Deliberately create and dispatch a distinct new responsibility after considering existing owners. Exact existing names are reused. Do not use to duplicate existing work.",
+        "parameters": {"type": "object", "properties": {
+            k: {"type": "string"} for k in ("name", "purpose", "instructions", "reason")},
+            "required": ["name", "purpose", "instructions", "reason"], "additionalProperties": False}}},
+])
+
+
+def search_agents(query: str, cursor: Optional[str] = None) -> ToolResult:
+    page = get_agent_roster().search(query, cursor)
+    emit("search", query=query, candidates=page["candidates"], paginated=bool(cursor),
+         response_bytes=len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode()))
+    return ToolResult(success=True, payload=page)
+
+
+def create_agent(name: str, purpose: str, instructions: str, reason: str) -> ToolResult:
+    if not all(isinstance(s, str) and s.strip() for s in (name, purpose, instructions, reason)):
+        return ToolResult(success=False, payload={"error": "Creation requires name, purpose, instructions and reason"})
+    asyncio.get_running_loop()  # Do not create an owner when dispatch cannot run.
+    roster = get_agent_roster()
+    candidates = roster.search(name + " " + instructions)["candidates"]
+    record, created = roster.create_or_reuse(name, purpose, instructions)
+    emit("creation_decision", selected_ref=record["ref"], created=created,
+         candidate_refs=[r["ref"] for r in candidates])
+    return _dispatch(record, instructions, created)
+
 
 # Create or reuse execution agent and dispatch instructions asynchronously
-def send_message_to_agent(agent_name: str, instructions: str) -> ToolResult:
+def send_message_to_agent(agent_name: Optional[str] = None, instructions: str = "", agent_ref: Optional[str] = None) -> ToolResult:
     """Send instructions to an execution agent."""
     roster = get_agent_roster()
-    roster.load()
-    existing_agents = set(roster.get_agents())
-    is_new = agent_name not in existing_agents
+    if not instructions.strip() or not (agent_name or agent_ref):
+        return ToolResult(success=False, payload={"error": "Provide instructions and an existing name or ref"})
+    record = roster.resolve(agent_name, agent_ref)
+    if record is None:
+        page = roster.search((agent_name or "") + " " + instructions)
+        emit("unknown_owner", candidate_refs=[r["ref"] for r in page["candidates"]])
+        return ToolResult(success=False, payload={"status": "creation_review_required", **page})
+    return _dispatch(record, instructions, False)
 
-    if is_new:
-        roster.add_agent(agent_name)
+
+def _dispatch(record, instructions: str, is_new: bool) -> ToolResult:
+    loop = asyncio.get_running_loop()
+    agent_name = record["name"]
+    get_agent_roster().mark_used(record["ref"], instructions)
+    emit("dispatch", selected_ref=record["ref"], created=is_new)
 
     get_execution_agent_logs().record_request(agent_name, instructions)
 
@@ -145,6 +190,7 @@ def send_message_to_agent(agent_name: str, instructions: str) -> ToolResult:
         payload={
             "status": "submitted",
             "agent_name": agent_name,
+            "agent_ref": record["ref"],
             "new_agent_created": is_new,
         },
     )
@@ -227,6 +273,10 @@ def handle_tool_call(name: str, arguments: Any) -> ToolResult:
 
         if name == "send_message_to_agent":
             return send_message_to_agent(**args)
+        if name == "search_agents":
+            return search_agents(**args)
+        if name == "create_agent":
+            return create_agent(**args)
         if name == "send_message_to_user":
             return send_message_to_user(**args)
         if name == "send_draft":
@@ -238,7 +288,7 @@ def handle_tool_call(name: str, arguments: Any) -> ToolResult:
         return ToolResult(success=False, payload={"error": f"Unknown tool: {name}"})
     except json.JSONDecodeError:
         return ToolResult(success=False, payload={"error": "Invalid JSON"})
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         return ToolResult(success=False, payload={"error": f"Missing required arguments: {exc}"})
     except Exception as exc:  # pragma: no cover - defensive
         logger.error("tool call failed", extra={"tool": name, "error": str(exc)})

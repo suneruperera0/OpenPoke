@@ -1,6 +1,7 @@
 """Interaction Agent Runtime - handles LLM calls for user and agent turns."""
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
@@ -10,6 +11,7 @@ from ...config import get_settings
 from ...services.conversation import get_conversation_log, get_working_memory_log
 from ...openrouter_client import request_chat_completion
 from ...logging_config import logger
+from ...services.execution.routing_trace import emit, turn_id
 
 
 @dataclass
@@ -65,6 +67,7 @@ class InteractionAgentRuntime:
     async def execute(self, user_message: str) -> InteractionResult:
         """Handle a user-authored message."""
 
+        token = turn_id.set(uuid.uuid4().hex)
         try:
             transcript_before = self._load_conversation_transcript()
             self.conversation_log.record_user_message(user_message)
@@ -95,11 +98,14 @@ class InteractionAgentRuntime:
                 response="",
                 error=str(exc),
             )
+        finally:
+            turn_id.reset(token)
 
     # Handle incoming messages from execution agents and generate appropriate responses
     async def handle_agent_message(self, agent_message: str) -> InteractionResult:
         """Process a status update emitted by an execution agent."""
 
+        token = turn_id.set(uuid.uuid4().hex)
         try:
             transcript_before = self._load_conversation_transcript()
             self.conversation_log.record_agent_message(agent_message)
@@ -130,6 +136,8 @@ class InteractionAgentRuntime:
                 response="",
                 error=str(exc),
             )
+        finally:
+            turn_id.reset(token)
 
     # Core interaction loop that handles LLM calls and tool executions until completion
     async def _run_interaction_loop(
@@ -166,12 +174,11 @@ class InteractionAgentRuntime:
             for tool_call in parsed_tool_calls:
                 summary.tool_names.append(tool_call.name)
 
-                if tool_call.name == "send_message_to_agent":
-                    agent_name = tool_call.arguments.get("agent_name")
-                    if isinstance(agent_name, str) and agent_name:
-                        summary.execution_agents.add(agent_name)
-
                 result = self._execute_tool(tool_call)
+                if tool_call.name in ("send_message_to_agent", "create_agent") and result.success:
+                    summary.execution_agents.add(result.payload["agent_ref"])
+                    emit("routing_progress", discovery_calls=summary.tool_names.count("search_agents"),
+                         selected_ref=result.payload["agent_ref"], iteration=iteration+1)
 
                 if result.user_message:
                     summary.user_messages.append(result.user_message)
@@ -183,6 +190,7 @@ class InteractionAgentRuntime:
                 }
                 messages.append(tool_message)
         else:
+            emit("iteration_exhausted", discovery_calls=summary.tool_names.count("search_agents"), iterations=self.MAX_TOOL_ITERATIONS)
             raise RuntimeError("Reached tool iteration limit without final response")
 
         if not summary.user_messages and not summary.last_assistant_text:
@@ -330,6 +338,10 @@ class InteractionAgentRuntime:
     # Format tool execution results into JSON for LLM consumption
     def _format_tool_result(self, tool_call: _ToolCall, result: ToolResult) -> str:
         """Render a tool execution result back to the LLM."""
+
+        if tool_call.name == "search_agents" and result.success:
+            from ...services.execution.directory import encoded
+            return encoded(result.payload)
 
         payload: Dict[str, Any] = {
             "tool": tool_call.name,

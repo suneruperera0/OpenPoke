@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ...services.execution import get_agent_roster
+from ...services.execution.routing_trace import emit
 
 _prompt_path = Path(__file__).parent / "system_prompt.md"
 SYSTEM_PROMPT = _prompt_path.read_text(encoding="utf-8").strip()
@@ -26,7 +27,7 @@ def prepare_message_with_history(
     sections: List[str] = []
 
     sections.append(_render_conversation_history(transcript))
-    sections.append(f"<active_agents>\n{_render_active_agents()}\n</active_agents>")
+    sections.append(_render_active_agents(latest_text, transcript))
     sections.append(_render_current_turn(latest_text, message_type))
 
     content = "\n\n".join(sections)
@@ -42,20 +43,12 @@ def _render_conversation_history(transcript: str) -> str:
 
 
 # Format currently active execution agents into XML tags for LLM awareness
-def _render_active_agents() -> str:
-    roster = get_agent_roster()
-    roster.load()
-    agents = roster.get_agents()
-
-    if not agents:
-        return "None"
-
-    rendered: List[str] = []
-    for agent_name in agents:
-        name = escape(agent_name or "agent", quote=True)
-        rendered.append(f'<agent name="{name}" />')
-
-    return "\n".join(rendered)
+def _render_active_agents(latest_text: str = "", transcript: str = "") -> str:
+    import json
+    block = get_agent_roster().shortlist(latest_text, transcript)
+    page = json.loads(block.split("\n", 1)[1].rsplit("\n", 1)[0])
+    emit("shortlist", candidates=page["candidates"], roster_bytes=len(block.encode("utf-8")))
+    return block
 
 
 # Wrap the current message in appropriate XML tags based on sender type

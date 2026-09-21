@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 import threading
 from html import escape, unescape
 from pathlib import Path
@@ -64,7 +65,10 @@ class ExecutionAgentLogStore:
 
     def _log_path(self, agent_name: str) -> Path:
         """Get log file path for an agent."""
-        return self._base_dir / f"{_slugify(agent_name)}.log"
+        slug = _slugify(agent_name)
+        if len(slug.encode("utf-8")) > 220:
+            slug = "long-name-" + hashlib.sha256(agent_name.encode()).hexdigest()
+        return self._base_dir / f"{slug}.log"
 
     def _append(self, agent_name: str, tag: str, payload: str) -> None:
         """Append an entry with the given tag."""

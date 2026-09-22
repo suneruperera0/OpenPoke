@@ -138,4 +138,34 @@ rendered roster block; the rest of the model prompt is outside this budget.
 
 Source: `results/retrieval-v2-heldout-once.json`, `summary` and `runs`.
 The original held-out 60% remains separate historical evidence.
-23 routing tests passed before scorer freeze. No live calls were made.
+23 routing tests passed before scorer freeze. No live calls were made in the
+retrieval evaluation above.
+
+## Final live sanity check (two cases)
+
+A small paired live-model run confirms the bounded + BM25 V2 treatment against the
+original full-roster OpenPoke on real model calls. It is pinned by commit:
+baseline `5b5f635935a64ab37884c025d70abb0ed731c094` (original full roster) and
+treatment `a3baf789773cbd8d92220fc24874b1f7db68793a`
+(`RANKING_VERSION = "field-bm25-v2-frozen"`). Model: `anthropic/claude-sonnet-4`.
+Two frozen cases at the 500-agent roster, one pair per condition.
+
+| Metric | Baseline (full roster) | V2 (bounded + BM25) | Change |
+| --- | ---: | ---: | ---: |
+| Initial context | 39,248.5 B | 17,958.5 B | −54.2% |
+| Prompt tokens | 22,533 | 14,479.5 | −35.7% |
+| Correct routing | 2/2 | 2/2 | — |
+| Spurious agents | 0 | 0 | — |
+| Failures | 2 (budget-cap) | 0 | — |
+
+The baseline failures are `evaluation_budget_cap`: its heavy full-roster context
+trips the per-trial cost guard even though it still routed correctly. Total cost:
+$0.23385. Source: `results/live-final-v2-500.json` (`baseline_commit`,
+`treatment_commit`, `runs`).
+
+This is a **two-case live sanity check**, not the retrieval-quality proof. It
+validates the architecture, absence of routing regression, and the real
+context/token reduction on live calls. Retrieval quality is established by the
+fresh offline holdout above (V1 25% → V2 86.7% at 500). Latency is secondary and
+was slightly higher for the treatment; part of that gap is an artifact of the
+baseline exiting early when it trips the budget cap.

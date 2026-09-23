@@ -1,5 +1,33 @@
 # OpenPoke 🌴
 
+## Take-home: bounded agent discovery
+
+As persistent agents accumulate, original OpenPoke includes every agent name in
+its interaction prompt: about 501 B at 10 agents and 25 KB at 500. This submission
+replaces that full roster with a ranked shortlist of **at most 8 agents / 4,096
+UTF-8 bytes**, plus on-demand directory search and explicit agent creation/reuse.
+Field-aware BM25-style retrieval improves owner discovery within the same bound.
+
+On the **same fresh synthetic holdout at 500 agents**, shortlist owner recall
+improved from **25% (V1) to 86.7% (V2)**, with a maximum roster block of **2,453 B**
+and zero bound violations. A separate two-case live sanity check routed correctly
+in both arms; its budget-limited results are described in the report.
+
+Start with the [final report and reproduction commands](evals/RETRIEVAL_V2.md).
+The [baseline measurement](evals/BASELINE.md) and [historical V1 evaluation](evals/ROUTING_README.md)
+preserve the problem → implementation → evaluation → retrieval improvement story.
+
+After installing backend dependencies, run the offline tests from the repo root:
+
+```bash
+.venv/bin/python -m unittest discover -s evals -p 'test_*.py' -v
+```
+
+The offline evaluation needs no API credits or Gmail connection. App setup follows.
+
+## Original application
+
+
 OpenPoke is a simplified, open-source take on [Interaction Company’s](https://interaction.co/about) [Poke](https://poke.com/) assistant—built to show how a multi-agent orchestration stack can feel genuinely useful. It keeps the handful of things Poke is great at (email triage, reminders, and persistent agents) while staying easy to spin up locally.
 
 - Multi-agent FastAPI backend that mirrors Poke's interaction/execution split, powered by [OpenRouter](https://openrouter.ai/).
@@ -15,7 +43,7 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
 ## Quickstart
 1. **Clone and enter the repo.**
    ```bash
-   git clone https://github.com/shlokkhemani/OpenPoke
+   git clone https://github.com/suneruperera0/OpenPoke
    cd OpenPoke
    ```
 2. **Create a shared env file.** Copy the template and open it in your editor:

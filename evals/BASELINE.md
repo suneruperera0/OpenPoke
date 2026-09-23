@@ -11,7 +11,7 @@ implementation.
 
 ```bash
 .venv/bin/python -m evals.baseline_roster_eval \
-  --output evals/results/baseline-roster.json
+  --output evals/results/my-baseline-roster.json
 ```
 
 Expected result:
@@ -26,3 +26,5 @@ Original OpenPoke — full agent roster
 
 The saved JSON contains all 105 measurements: seven representative roster
 cases, three roster sizes, and five shuffled distractor seeds.
+
+Use a fresh output filename to preserve the tracked `results/baseline-roster.json`.

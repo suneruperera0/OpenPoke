@@ -1,188 +1,149 @@
-# Retrieval v2: development checkpoint
+# Bounded agent discovery: final report
 
-Status: final development pass completed; scorer frozen before fresh holdout authoring.
-No model calls, external dependencies, embeddings, or paid APIs are used.
-The historical v1 held-out report (including 60% recall at 500 agents) is unchanged.
+OpenPoke originally inserts the entire persistent-agent roster into each interaction
+prompt. The implementation ranks owners, renders at most eight within a 4,096-byte
+roster block, and provides search for the rest. Dispatch reuses existing identities;
+new responsibilities require explicit creation.
 
-## Design
+## Final results
 
-`directory.py` retains the directory format, references, exact-reference priority,
-recent-delegation priority, search API, pagination and renderer. The initial roster
-block is still capped at eight records and 4,096 UTF-8 bytes, including its envelope.
-This is a roster-block cap, not a bound on the entire conversation prompt.
+### Fresh offline holdout
 
-The scorer is a field-aware BM25 variant, not a claim of canonical BM25F:
+Both rankers received identical requests, histories and rosters. Recall measures
+whether the correct owner survives into the rendered shortlist, after byte trimming.
 
-- Names have weight 1; responsibility/history has weight 2.
-- Purpose and recent instructions are combined by maximum per-term frequency,
-  avoiding repeated evidence from duplicate metadata.
-- Term frequency is field-length normalized (b=0.5), with the length penalty capped
-  at 1.5 to limit dilution from long histories. The strongest normalized
-  field supplies each term's evidence, followed by BM25 saturation (k1=1.2).
-- Document frequency is measured once across each agent's combined fields.
-- Simple plural normalization affects lexical scoring only, never identities.
-- Latest-request terms have weight 1; previous-user-context terms weight 0.5.
-- Exact-reference and recent-delegation priority remain unchanged.
-
-The final development pass adds a small, explicit general lexical alias map
-(e.g. vendor/supplier, purchase/procurement) and strips only comma-delimited
-", not ..." clauses from positive query evidence. These are limited heuristics:
-renewal/extension and similar aliases are not equivalent in every domain, and other
-negation forms are not handled. Names and references are never normalized for identity.
-The scorer remains self-contained and standard-library-only.
-
-## Reproduce from repository root
-
-Use the project virtual environment with `server/requirements.txt` installed for
-integration tests. The evaluation itself can also run with standard-library Python.
-
-```bash
-.venv/bin/python -m unittest discover -s evals -p 'test_*.py' -v
-.venv/bin/python -m evals.retrieval_v2_eval --output evals/results/my-retrieval-v2-dev.json
-```
-
-Choose a fresh output name; the evaluator refuses to overwrite evidence.
-V1 is loaded directly from commit `fd7b71d3713237a0f0f60ef5871c1589b9ce01e0`.
-V2 uses the current directory source. Source/fixture hashes are recorded.
-
-## New development fixtures and counting
-
-14 authored development tasks: 12 unique-owner tasks, one new responsibility,
-and one ambiguous request. They cover explicit identities, opaque names, plurals,
-contextual follow-ups, overlapping work, exclusions, paraphrases, old owners,
-longer histories, topic changes and shared contacts.
-
-Each task has five seeds and nested 10/100/500-agent rosters. A condition supplies
-exactly the same roster, history, user request and recent-owner state to v1/v2;
-the saved fixture hash allows checking this pairing. Metadata comes through the
-production legacy-history migration. Expected-owner labels never enter scoring.
-
-- **210 conditions** = 14 tasks × 3 sizes × 5 seeds.
-- **420 ranker executions** = 210 conditions × 2 rankers, per development run.
-- Recall denominator at each size: **60** = 12 unique-owner tasks × 5 seeds.
-- New/ambiguous cases exercise bounds only, not model creation/clarification quality.
-
-These are intentionally dense synthetic hard negatives: many agents share project,
-contact or responsibility, some near-duplicate responsibilities recur. They are not
-representative usage estimates. Seeds are correlated repetitions of 14 tasks, not
-210 independent language-understanding examples. The recent-owner fixture is a
-synthetic unrelated pin; it does not validate real-world recency behavior broadly.
-
-## Development results
-
-| Agents | V1 shortlist recall | V2 shortlist recall | V2 max roster bytes |
-| ---: | ---: | ---: | ---: |
-| 10 | 100% | 100% | 2,073 |
-| 100 | 16.7% | 83.3% | 2,507 |
-| 500 | 16.7% | 78.3% | 2,675 |
-
-Shortlist recall is measured after rendering/byte trimming. First-search recall
-happened to match shortlist recall here. Every measured block remained within both
-bounds. The 500-agent v2 score is 47/60 successes, versus 10/60 for v1.
-
-Two development runs are retained:
-
-1. `retrieval-v2-dev-1.json`: field scores were added independently; both rankers
-   scored 16.7% at 500. Inspection showed descriptive wrong-project agents received
-   duplicated lexical credit from names and history.
-2. `retrieval-v2-dev-2.json`: strongest-field pooling before saturation improved
-   v2 to 78.3%. Remaining 500-agent misses: paraphrase 5/5, long history 5/5,
-   excluded topic 3/5. This was the intermediate development implementation.
-
-The first run's source hash differs from current source; its output is historical
-iteration evidence, not the final scorer's result. Both runs used identical fixtures.
-There was one scoring revision; no attempt was made to force the 90% aspiration.
-
-## Final development pass and freeze
-
-Exactly one final pass addressed paraphrases, long histories and comma-delimited
-exclusions. `retrieval-v2-dev-final.json` records 100% v2 recall at all three sizes,
-with max bytes 2,057 / 2,507 / 2,675. V1 remained 100% / 16.7% / 16.7%.
-This is development evidence, not a held-out generalization claim.
-
-`retrieval_v2_freeze.json` records scorer version, code/test/evaluator/development
-fixture hashes and freeze time. After that, `retrieval_v2_holdout.py` was authored
-with 14 new tasks, new identities, duties, phrasing and distractor templates.
-`retrieval_v2_holdout_freeze.json` records its hash before evaluation.
-Neither scorer nor holdout was edited after observing holdout results.
-
-The fresh holdout was run once, with both rankers on identical fixtures:
-
-```bash
-.venv/bin/python -m evals.retrieval_v2_eval --split heldout --output evals/results/my-fresh-holdout.json
-```
-
-This command reproduces evidence; its output must never be used to retune on this
-holdout. Source hashes can be checked against the freeze manifests first.
-
-Holdout counting: 14 authored tasks × 3 sizes × 5 seeds = 210 conditions,
-420 ranker executions. At each size there are 60 unique-owner recall observations
-(12 tasks × 5 seeds). New/ambiguous cases check bounds, not model decisions.
-Synthetic repeated distractors and correlated seeds limit generalizability.
-The fresh holdout includes one semantic paraphrase beyond the alias vocabulary.
-This is a single-author synthetic evaluation, not independently authored validation.
-
-## Fresh holdout results (single run)
-
-| Agents | V1 recall | V2 recall | V2 max roster bytes | Bound violations (both) |
+| Agents | V1 recall | Frozen V2 recall | V2 max roster bytes | Bound violations (both) |
 | ---: | ---: | ---: | ---: | ---: |
 | 10 | 100% | 100% | 2,371 | 0 |
 | 100 | 25% | 90% | 2,380 | 0 |
 | 500 | 25% | 86.7% | 2,453 | 0 |
 
-At 500: v1 15/60, v2 52/60. V2 missed 5/5 semantic-gap and 3/5 topic-switch
-conditions. It improved by 61.7 percentage points on these same fixtures but
-missed the 90% target at 500 and the 95% target at 100. No subsequent tuning.
-First-search recall equals shortlist recall in this run. Bytes measure only the
-rendered roster block; the rest of the model prompt is outside this budget.
+At 500 agents, V1 found 15/60 owners and V2 found 52/60. First-search recall matched
+shortlist recall in this run. Source: [fresh holdout JSON](results/retrieval-v2-heldout-once.json).
+The historical V1 score of 60% used a different fixture set and is not the baseline
+for this comparison.
 
-Source: `results/retrieval-v2-heldout-once.json`, `summary` and `runs`.
-The original held-out 60% remains separate historical evidence.
-23 routing tests passed before scorer freeze. No live calls were made in the
-retrieval evaluation above.
+### Pinned live sanity check
 
-## Final live sanity check (two cases)
+Two routing cases at 500 agents used `anthropic/claude-sonnet-4`. Execution-agent
+work was simulated; the Interaction Agent made real model calls.
 
-A small paired live-model run confirms the bounded + BM25 V2 treatment against the
-original full-roster OpenPoke on real model calls. It is pinned by commit:
-baseline `5b5f635935a64ab37884c025d70abb0ed731c094` (original full roster) and
-treatment `a3baf789773cbd8d92220fc24874b1f7db68793a`
-(`RANKING_VERSION = "field-bm25-v2-frozen"`). Model: `anthropic/claude-sonnet-4`.
-Two frozen cases at the 500-agent roster, one pair per condition.
+| Mean per trial, except counts | Original full roster | Frozen V2 |
+| --- | ---: | ---: |
+| Initial serialized request bytes | 39,248.5 | 17,958.5 |
+| Total prompt tokens | 22,533 | 14,479.5 |
+| Correct routing | 2/2 | 2/2 |
+| New/unnecessary agents | 0 | 0 |
+| Evaluator budget-cap failures | 2 | 0 |
 
-| Metric | Baseline (full roster) | V2 (bounded + BM25) | Change |
-| --- | ---: | ---: | ---: |
-| Initial context | 39,248.5 B | 17,958.5 B | −54.2% |
-| Prompt tokens | 22,533 | 14,479.5 | −35.7% |
-| Correct routing | 2/2 | 2/2 | — |
-| Spurious agents | 0 | 0 | — |
-| Failures | 2 (budget-cap) | 0 | — |
+Both cases routed correctly in both arms. The baseline then hit the evaluator's
+per-trial reservation cap: each baseline trial received two model responses, versus
+three for treatment. Token totals therefore describe the observed capped runs,
+not equal-completion task costs; latency is also affected by that early exit.
+Initial serialized request bytes include system text, tools and request settings;
+they are distinct from the roster-block bytes in the offline table.
+Total recorded cost: $0.23385. Source: [live JSON](results/live-final-v2-500.json).
 
-The baseline failures are `evaluation_budget_cap`: its heavy full-roster context
-trips the per-trial cost guard even though it still routed correctly. Total cost:
-$0.23385. Source: `results/live-final-v2-500.json` (`baseline_commit`,
-`treatment_commit`, `runs`).
+The live runner pins original source `5b5f635935a64ab37884c025d70abb0ed731c094`
+and treatment `a3baf789773cbd8d92220fc24874b1f7db68793a`. Later robustness changes
+in `081cbfe` were not part of that live run; the frozen scorer remains unchanged.
 
-This is a **two-case live sanity check**, not the retrieval-quality proof. It
-validates the architecture, absence of routing regression, and the real
-context/token reduction on live calls. Retrieval quality is established by the
-fresh offline holdout above (V1 25% → V2 86.7% at 500). Latency is secondary and
-was slightly higher for the treatment; part of that gap is an artifact of the
-baseline exiting early when it trips the budget cap.
+## Reproduce from repository root
 
-## Scope of the claims
+Use a full Git checkout so historical source commits are available. For tests,
+create a Python 3.10+ environment and install backend dependencies:
 
-Stated deliberately narrowly, to match the evidence:
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r server/requirements.txt
+.venv/bin/python -m unittest discover -s evals -p 'test_*.py' -v
+```
 
-- **Retrieval:** V2 substantially improved owner recall on the fresh synthetic
-  holdout (25% → 86.7% at 500 agents). This is a single-author synthetic
-  evaluation; it is not a claim of universally better retrieval, and V2 still
-  misses semantic paraphrases and topic switches (it did not reach the 90% target).
-- **Overload:** the system bounds roster-context growth — one concrete source of
-  agent overload — without giving up routing quality. It does not claim to address
-  every dimension of agent overload.
-- **New-agent creation** is validated offline (unit/integration tests). The paid
-  live check deliberately focused on bounded existing-owner routing and real
-  prompt/context cost, not on the creation path.
-- **Live routing** was correct in both tested cases (n=2, exact-name owners); this
-  is a sanity check, not a routing-accuracy measurement.
+Offline evaluators use the standard library and need no API keys. Choose fresh
+output names to preserve saved evidence:
+
+```bash
+.venv/bin/python -m evals.baseline_roster_eval --output evals/results/my-baseline.json
+.venv/bin/python -m evals.retrieval_v2_eval --split dev --output evals/results/my-v2-dev.json
+.venv/bin/python -m evals.retrieval_v2_eval --split heldout --output evals/results/my-v2-heldout.json
+```
+
+The V2 evaluator reads current scorer source and pins V1 to `fd7b71d`. Verify the
+hashes in [the scorer freeze manifest](retrieval_v2_freeze.json) and
+[holdout freeze manifest](retrieval_v2_holdout_freeze.json) before reproduction.
+Reproduction must not become tuning against the holdout. Frozen source docstrings
+retain their wording from the time of freezing; the evaluator now supports both splits.
+
+### Live runner prerequisite and optional reproduction
+
+The live runner requires the original upstream commit, which is not an ancestor
+of the clean imported fork history. If `git cat-file` fails, fetch that object from
+upstream; this only retrieves objects and does not change the checkout:
+
+```bash
+git cat-file -e 5b5f635935a64ab37884c025d70abb0ed731c094^{commit}
+# Only if the object is missing:
+git fetch https://github.com/shlokkhemani/OpenPoke.git 5b5f635935a64ab37884c025d70abb0ed731c094
+```
+
+Validate the harness with scripted responses first (no paid model calls):
+
+```bash
+.venv/bin/python -m evals.live_routing_eval --sizes 500 --budget 0.30 --output evals/results/my-live-offline.json
+```
+
+The following is optional and **makes paid calls**, using `OPENROUTER_API_KEY` from
+the environment or `.env`. Reuse the saved evidence unless a new run is needed:
+
+```bash
+.venv/bin/python -m evals.live_routing_eval --live --sizes 500 --budget 0.30 --per-trial-budget 0.16 --max-calls 3 --max-tokens 256 --output evals/results/my-live-v2.json
+```
+
+## Method and design
+
+Each V2 split contains 14 authored tasks × 3 sizes × 5 seeds = **210 conditions**,
+or **420 ranker executions** for the paired comparison. Recall uses 12 unique-owner
+tasks × 5 seeds = 60 observations per size. New and ambiguous requests exercise
+bounds only. Fixtures use nested rosters with overlapping responsibilities;
+metadata comes from production history migration, not expected-owner labels.
+
+The scorer uses field-aware BM25-style scoring, with name weight 1 and responsibility
+weight 2, k1=1.2, and b=0.5. It takes the strongest field evidence per term, deduplicates
+repeated history evidence, caps the length penalty at 1.5, and gives older user
+context half weight. Simple plural folding, a small lexical alias map and a narrow
+comma-delimited exclusion rule supplement lexical matching. Exact references and
+recent delegation priority remain intact. Names and references are never normalized
+for identity. The implementation is standard-library-only.
+
+Development preceded the recorded scorer freeze. The fresh holdout was authored
+and hashed after freezing, then evaluated once without further scorer changes.
+Source hashes and per-condition fixture hashes are retained in the evidence.
+
+## Evidence index
+
+| Stage | Evidence | Purpose |
+| --- | --- | --- |
+| Original behavior | [baseline-roster.json](results/baseline-roster.json) | Full-roster context growth |
+| Historical V1 | [routing-dev-v3.json](results/routing-dev-v3.json), [routing-heldout-v1.json](results/routing-heldout-v1.json) | First ranker's development and original 60% result |
+| V2 development history | [dev-1](results/retrieval-v2-dev-1.json), [dev-2](results/retrieval-v2-dev-2.json) | Intermediate 500-agent recall: 16.7%, then 78.3% |
+| Frozen V2 development | [dev-final](results/retrieval-v2-dev-final.json) | Final development recall: 100% at each size |
+| Final retrieval quality | [heldout-once](results/retrieval-v2-heldout-once.json) | Fresh paired holdout; primary quality evidence |
+| Live sanity check | [live-final-v2-500.json](results/live-final-v2-500.json) | Pinned two-case model run |
+| Provenance | [scorer freeze](retrieval_v2_freeze.json), [holdout freeze](retrieval_v2_holdout_freeze.json) | Freeze times and file hashes |
+
+Intermediate result files retain their original scorer hashes; they do not describe
+the final scorer. Tests cover directory identity/migration, bounds, pagination,
+creation/reuse, iteration limits and the actual prompt-construction path.
+
+## Limitations
+
+- Fixtures are synthetic and single-author; seeds are correlated repetitions, not
+  independent language-understanding examples.
+- V2 missed the targets of 95% at 100 and 90% at 500 agents. At 500 it missed five
+  semantic-paraphrase and three topic-switch conditions. Lexical aliases and the
+  narrow exclusion heuristic do not provide general semantic understanding.
+- The live check covers two existing-owner cases, with owners named in the request
+  or preceding context. It does not establish general routing accuracy, live creation
+  quality or execution-agent task quality; the budget cap also limits cost comparisons.
+- The bound applies to the roster block, not the complete conversation. This addresses
+  roster-context growth, not every form of agent overload.

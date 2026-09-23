@@ -1,68 +1,16 @@
-# Bounded agent discovery: evaluation report
+# Historical V1: bounded discovery evaluation
 
-## Problem and implementation
+This report records the first lexical-IDF ranker (`lexical-idf-v2`), before BM25 V2.
+For the current implementation and final evidence, start with the
+[final report](RETRIEVAL_V2.md).
 
-Pinned baseline: `5b5f635935a64ab37884c025d70abb0ed731c094`.
+The first implementation replaced the original full roster with a bounded shortlist
+and on-demand search. Its evaluation showed that bounding context worked, but owner
+retrieval weakened as the roster grew. That finding motivated V2.
 
-The baseline inserts every persistent agent name into every interaction prompt.
-Its roster has no purpose metadata, and dispatching an unknown name immediately
-creates another agent. This project replaces that path with:
+## Historical results
 
-- versioned directory records derived from real instructions/history;
-- stable opaque references that preserve arbitrarily long exact identities;
-- an eight-candidate, 4,096-byte initial shortlist;
-- lexical-IDF ranking over names, entities, purpose and recent instructions;
-- paginated `search_agents` discovery over the whole directory;
-- existing-owner-only dispatch and deliberate `create_agent` creation;
-- routing traces for candidates, bytes, searches, dispatch/creation and iteration
-  exhaustion.
-
-No embeddings, model-generated metadata, batching changes, or UI changes are in
-scope. Similar names are never merged. Legacy name lists migrate once with a
-`.legacy.bak` copy, and existing agent names/log identities remain unchanged.
-
-## Reproduce without network or credits
-
-From the repository root:
-
-```sh
-.venv/bin/python -m unittest discover -s evals -p 'test_*.py' -v
-.venv/bin/python -m evals.routing_eval --split dev --output evals/results/my-routing-dev.json
-.venv/bin/python -m evals.routing_eval --split heldout --output evals/results/my-routing-heldout.json
-```
-
-The evaluator refuses to overwrite evidence files. Use fresh filenames. It loads
-the baseline prompt renderer directly from the pinned Git commit and runs the
-treatment directory in temporary storage. It never imports application startup,
-reads `.env`, calls a model, or touches the real roster.
-
-## Fixtures and metrics
-
-There are 14 authored tasks: seven development tasks and seven held-out tasks.
-Each split covers exact reference, contextual follow-up, paraphrase, overlapping
-responsibilities, old owner, new responsibility, and ambiguity. Held-out tasks use
-different people, projects, naming styles, overlaps and historical facts.
-
-Each authored task runs against 10, 100 and 500-agent rosters with five shuffled
-distractor seeds: 105 executions per split, 210 total. Synthetic sizes are stress
-levels, not claims about typical product usage.
-
-The retrieval query is the original user request plus the same bounded recent-user
-context used in production. No ideal evaluator query is supplied. New and ambiguous
-tasks are excluded from owner-recall denominators because they have no unique
-correct existing owner.
-
-`name_only` uses the treatment ranker with names alone. `enriched` adds metadata.
-This isolates metadata's retrieval contribution. The baseline measurement is its
-full roster byte size and availability of every owner; it is not a baseline model
-routing score because no paid model evaluation was run.
-
-## Results
-
-Development results were used to tune and freeze `lexical-idf-v2`. Held-out
-results were then run once without retuning.
-
-| Split | Agents | Name-only shortlist / search recall | Enriched shortlist / search recall | Max treatment roster bytes | Mean baseline bytes |
+| Split | Agents | Name-only shortlist / search recall | Enriched shortlist / search recall | Max enriched roster bytes | Mean original roster bytes |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Development | 10 | 84% / 40% | 100% / 100% | 2,570 | 503 |
 | Development | 100 | 40% / 40% | 100% / 100% | 2,801 | 4,907 |
@@ -71,49 +19,44 @@ results were then run once without retuning.
 | Held-out | 100 | 20% / 20% | 92% / 92% | 2,938 | 4,905 |
 | Held-out | 500 | 20% / 20% | 60% / 60% | 3,083 | 24,964 |
 
-The bound held in every run. At 500 agents the shortlist was about 88% smaller
-than the baseline by bytes in the worst reported treatment case. Metadata greatly
-improved retrieval, but lexical retrieval missed 40% of held-out owners at 500.
-That failure is part of the result: v1 bounds context but does not preserve adequate
-owner recall for every dense, overlapping roster.
+Sources: [development JSON](results/routing-dev-v3.json) and
+[held-out JSON](results/routing-heldout-v1.json). This historical 60% is not the
+baseline score on V2's fresh holdout; that separate paired comparison is 25% → 86.7%.
 
-The first-search and shortlist recall are identical in this benchmark because both
-use the original request/context and the same eight-result ranker. `search_agents`
-still matters operationally: the model can reformulate a weak query or paginate an
-empty listing, but that behavior needs live or scripted-agent evaluation.
+## Method
 
-## Scripted integration evidence
+14 authored tasks, seven per split, cover explicit owners, follow-ups, paraphrases,
+overlapping work, old owners, new responsibilities and ambiguity. Each task runs
+at 10/100/500 agents with five seeds: 105 conditions per split, 210 total, each
+scored in name-only and metadata-enriched variants. Unique-owner recall excludes
+new and ambiguous tasks (25 eligible observations per size per split).
 
-The offline tests demonstrate:
+Queries use the actual request plus bounded recent-user context. Enriched shortlist
+and first-search recall matched in this experiment; name-only recall sometimes
+differed because shortlist explicit-name prioritization uses the latest request.
+Original full-roster bytes were measured with the original renderer; they are not
+a real-model routing score. Development preceded the historical held-out run.
 
-- shortlist/search results can dispatch by stable reference;
-- unknown names return plausible owners and do not create anything;
-- explicit creation atomically creates once and reuses an exact name thereafter;
-- similar names stay separate and conflicting name/reference inputs fail;
-- a normal one-search/one-dispatch path fits within eight iterations;
-- repeated searching is recorded as iteration exhaustion;
-- legacy migration, malformed storage, byte limits, long names, cursor staleness,
-  pagination reachability, concurrent creation, recent owner updates and clear
-  behavior work as specified.
+## Reproduce the historical version
 
-These are scripted integration checks, not evidence that Claude understands the
-new tools. The demo fixtures are frozen in `routing_fixtures.py`. In the development
-demo, both explicit and contextual follow-up owners are found in the initial
-shortlist; no recovery miss was manufactured. Search recovery is exercised through
-the tool integration test.
+The evaluator loads the working tree's `directory.py`. Running it on final `main`
+uses BM25 V2 and will not reproduce this table. From the current repo root, create
+a separate checkout of the historical evaluation commit:
 
-## Limits and next decision
+```bash
+git worktree add --detach ../OpenPoke-v1-evidence e47c2bf
+```
 
-This offline evaluation establishes bounded context, retrieval quality, and
-scripted tool-flow correctness. It does not establish real-model routing,
-clarification, creation behavior, end-to-end task quality, latency, or cost.
-Those measurements belong to the separate live-model evaluation.
+Then enter that checkout and run with Python 3.10+ (standard library only):
 
-At 500 agents, enriched lexical recall falls to 60% on the untouched held-out
-set. Do not tune further on that set. Any retrieval improvement should be chosen
-using new development fixtures and measured on a newly frozen holdout.
+```bash
+cd ../OpenPoke-v1-evidence
+python3 -m evals.routing_eval --split dev --output evals/results/my-routing-dev.json
+python3 -m evals.routing_eval --split heldout --output evals/results/my-routing-heldout.json
+```
 
-The tracked evidence files are:
-
-- `evals/results/routing-dev-v3.json`
-- `evals/results/routing-heldout-v1.json`
+Use an unused worktree path and fresh output names. This preserves your current
+checkout and tracked results. The evaluator extracts the original renderer from
+clean imported baseline `659e03c7…`, corresponding to upstream `5b5f635…`.
+Do not tune retrieval using this historical holdout. Shared test instructions,
+limitations and the evidence index are in the [final report](RETRIEVAL_V2.md).

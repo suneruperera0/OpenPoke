@@ -6,6 +6,7 @@ from typing import Dict, List
 
 from ...services.execution import get_agent_roster
 from ...services.execution.routing_trace import emit
+from ...logging_config import logger
 
 _prompt_path = Path(__file__).parent / "system_prompt.md"
 SYSTEM_PROMPT = _prompt_path.read_text(encoding="utf-8").strip()
@@ -45,8 +46,12 @@ def _render_conversation_history(transcript: str) -> str:
 # Format currently active execution agents into XML tags for LLM awareness
 def _render_active_agents(latest_text: str = "", transcript: str = "") -> str:
     import json
-    block = get_agent_roster().shortlist(latest_text, transcript)
-    page = json.loads(block.split("\n", 1)[1].rsplit("\n", 1)[0])
+    try:
+        block = get_agent_roster().shortlist(latest_text, transcript)
+        page = json.loads(block.split("\n", 1)[1].rsplit("\n", 1)[0])
+    except Exception as exc:  # a bad roster must never break prompt construction
+        logger.warning("active_agents shortlist unavailable; rendering empty block: %s", exc)
+        return "<active_agents>\n</active_agents>"
     emit("shortlist", candidates=page["candidates"], roster_bytes=len(block.encode("utf-8")))
     return block
 

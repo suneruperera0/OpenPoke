@@ -1,12 +1,15 @@
 import asyncio
+import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from server.agents.interaction_agent import tools
+from server.agents.interaction_agent import agent as interaction_agent
+from server.agents.interaction_agent.agent import prepare_message_with_history
 from server.agents.interaction_agent.runtime import InteractionAgentRuntime, _ToolCall
-from server.services.execution.directory import AgentDirectory
+from server.services.execution.directory import AgentDirectory, BUDGET, LIMIT
 
 
 class FakeLogs:
@@ -95,6 +98,49 @@ class IterationBudgetTests(unittest.IsolatedAsyncioTestCase):
         summary = await runtime._run_interaction_loop('system', [{'role':'user','content':'test'}])
         self.assertEqual(summary.last_assistant_text, 'done')
         self.assertEqual(summary.tool_names, ['search_agents', 'send_message_to_agent'])
+
+
+class PromptPathTests(unittest.TestCase):
+    """The whole point of the change: the Interaction Agent prompt must receive the
+    bounded shortlist, not the full roster. These guard the prompt-construction path."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = AgentDirectory(Path(self.tmp.name) / 'roster.json')
+        patcher = patch.object(interaction_agent, 'get_agent_roster', return_value=self.directory)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _active_block(content):
+        start = content.index('<active_agents>')
+        end = content.index('</active_agents>') + len('</active_agents>')
+        return content[start:end]
+
+    def test_prompt_receives_bounded_shortlist_not_full_roster(self):
+        for i in range(50):
+            self.directory.create_or_reuse(f'Project {i} owner', instructions=f'Handle project {i} logistics')
+        content = prepare_message_with_history('Handle project 7 logistics', '', 'user')[0]['content']
+        block = self._active_block(content)
+        self.assertLessEqual(len(block.encode('utf-8')), BUDGET)
+        page = json.loads(block.split('\n', 1)[1].rsplit('\n', 1)[0])
+        self.assertLessEqual(len(page['candidates']), LIMIT)
+        # 50 agents exist; the prompt must not contain them all (no full-roster leak).
+        self.assertLess(len(page['candidates']), 50)
+
+    def test_empty_roster_renders_safe_block(self):
+        content = prepare_message_with_history('hello', '', 'user')[0]['content']
+        page = json.loads(self._active_block(content).split('\n', 1)[1].rsplit('\n', 1)[0])
+        self.assertEqual(page['candidates'], [])
+
+    def test_malformed_roster_degrades_to_empty_block(self):
+        broken = Mock()
+        broken.shortlist.side_effect = ValueError('malformed directory')
+        with patch.object(interaction_agent, 'get_agent_roster', return_value=broken):
+            block = interaction_agent._render_active_agents('hi', '')
+        self.assertIn('<active_agents>', block)
+        self.assertIn('</active_agents>', block)
 
 
 if __name__ == '__main__': unittest.main()

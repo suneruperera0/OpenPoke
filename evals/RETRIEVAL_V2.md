@@ -169,3 +169,20 @@ context/token reduction on live calls. Retrieval quality is established by the
 fresh offline holdout above (V1 25% → V2 86.7% at 500). Latency is secondary and
 was slightly higher for the treatment; part of that gap is an artifact of the
 baseline exiting early when it trips the budget cap.
+
+## Scope of the claims
+
+Stated deliberately narrowly, to match the evidence:
+
+- **Retrieval:** V2 substantially improved owner recall on the fresh synthetic
+  holdout (25% → 86.7% at 500 agents). This is a single-author synthetic
+  evaluation; it is not a claim of universally better retrieval, and V2 still
+  misses semantic paraphrases and topic switches (it did not reach the 90% target).
+- **Overload:** the system bounds roster-context growth — one concrete source of
+  agent overload — without giving up routing quality. It does not claim to address
+  every dimension of agent overload.
+- **New-agent creation** is validated offline (unit/integration tests). The paid
+  live check deliberately focused on bounded existing-owner routing and real
+  prompt/context cost, not on the creation path.
+- **Live routing** was correct in both tested cases (n=2, exact-name owners); this
+  is a sanity check, not a routing-accuracy measurement.

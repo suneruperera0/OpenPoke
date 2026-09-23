@@ -125,6 +125,11 @@ TOOL_SCHEMAS.extend([
 ])
 
 
+def _bounded_query(text: str) -> str:
+    """Clip a discovery query to the directory byte budget so long instructions can't hard-fail search."""
+    return text.encode("utf-8")[:8000].decode("utf-8", "ignore")
+
+
 def search_agents(query: str, cursor: Optional[str] = None) -> ToolResult:
     page = get_agent_roster().search(query, cursor)
     emit("search", query=query, candidates=page["candidates"], paginated=bool(cursor),
@@ -137,7 +142,7 @@ def create_agent(name: str, purpose: str, instructions: str, reason: str) -> Too
         return ToolResult(success=False, payload={"error": "Creation requires name, purpose, instructions and reason"})
     asyncio.get_running_loop()  # Do not create an owner when dispatch cannot run.
     roster = get_agent_roster()
-    candidates = roster.search(name + " " + instructions)["candidates"]
+    candidates = roster.search(_bounded_query(name + " " + instructions))["candidates"]
     record, created = roster.create_or_reuse(name, purpose, instructions)
     emit("creation_decision", selected_ref=record["ref"], created=created,
          candidate_refs=[r["ref"] for r in candidates])
@@ -150,9 +155,14 @@ def send_message_to_agent(agent_name: Optional[str] = None, instructions: str = 
     roster = get_agent_roster()
     if not instructions.strip() or not (agent_name or agent_ref):
         return ToolResult(success=False, payload={"error": "Provide instructions and an existing name or ref"})
-    record = roster.resolve(agent_name, agent_ref)
+    try:
+        record = roster.resolve(agent_name, agent_ref)
+    except ValueError as exc:
+        if "Conflicting" in str(exc):
+            return ToolResult(success=False, payload={"error": str(exc)})
+        record = None  # unknown/stale ref: fall through to candidate recovery below
     if record is None:
-        page = roster.search((agent_name or "") + " " + instructions)
+        page = roster.search(_bounded_query((agent_name or "") + " " + instructions))
         emit("unknown_owner", candidate_refs=[r["ref"] for r in page["candidates"]])
         return ToolResult(success=False, payload={"status": "creation_review_required", **page})
     return _dispatch(record, instructions, False)
